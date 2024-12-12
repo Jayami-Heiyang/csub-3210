@@ -1,0 +1,221 @@
+---
+title: "Math 3210 - Final Project"
+author: "Jay Ryan"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r, warning = FALSE, message = FALSE}
+library(mosaic)
+library(palmerpenguins)
+penguinz0 = penguins
+summary(penguinz0)
+```
+The dataset already exhibits consistent nomenclature of variables, with no variations in casing, spacing, or other features of categorical variables that may confound R's recognition of distinct categories. However, there are several rows with missing values that may require handling, especially in the gender column.
+
+```{r}
+# Checking which rows have more than one missing value:
+NA_rows = which(rowSums(is.na(penguinz0)) > 1)
+print(penguins[NA_rows, ])
+```
+
+We're in luck. The only two NA values in each of the numeric columns correspond to the same two penguins, who are missing data in \textit{every} column (except year). With over 300 other penguins to analyze, these rows can (and should) be omitted entirely -- their forced inclusion would offer no meaningful addition to the analysis.
+
+```{r}
+# Removing rows with no data at all:
+penguinz1 = penguinz0[-NA_rows, ]
+```
+
+Which leaves us with only missing genders for nine of our remaining penguins. We may be able to speculate on them using the rest of the dataset.
+
+```{r}
+# Summarizing male penguins only:
+penguinz1_males = filter(penguinz1, sex == 'male')
+summary(penguinz1_males)
+
+# Summarizing female penguins only:
+penguinz1_females = filter(penguinz1, sex == 'female')
+summary(penguinz1_females)
+
+# Looking at the penguins with missing gender to assess their individual stats:
+NA_genders = which(is.na(penguinz1$sex))
+print(penguinz1[NA_genders, ])
+```
+
+While measurements in each category are generally slightly lower for the female penguins than the males, none of these penguins are outside the expected ranges for each gender. We can try k-means clustering instead, but first we should determine if there are any distinct differences between penguins of different species or location. We can ignore the Chinstrap penguins here since there are no Chinstrap penguins with missing gender:
+
+```{r, message = FALSE}
+# Summary table of descriptive statistics for each individual species/locale:
+summary_table = penguinz1 %>%
+  group_by(species, island) %>%
+  summarise(
+    bill_length_mm_min = min(bill_length_mm, na.rm = TRUE),
+    bill_length_mm_max = max(bill_length_mm, na.rm = TRUE),
+    bill_length_mm_median = median(bill_length_mm, na.rm = TRUE),
+    bill_length_mm_mean = mean(bill_length_mm, na.rm = TRUE),
+    bill_depth_mm_min = min(bill_depth_mm, na.rm = TRUE),
+    bill_depth_mm_max = max(bill_depth_mm, na.rm = TRUE),
+    bill_depth_mm_median = median(bill_depth_mm, na.rm = TRUE),
+    bill_depth_mm_mean = mean(bill_depth_mm, na.rm = TRUE),
+    flipper_length_mm_min = min(flipper_length_mm, na.rm = TRUE),
+    flipper_length_mm_max = max(flipper_length_mm, na.rm = TRUE),
+    flipper_length_mm_median = median(flipper_length_mm, na.rm = TRUE),
+    flipper_length_mm_mean = mean(flipper_length_mm, na.rm = TRUE),
+    body_mass_g_min = min(body_mass_g, na.rm = TRUE),
+    body_mass_g_max = max(body_mass_g, na.rm = TRUE),
+    body_mass_g_median = median(body_mass_g, na.rm = TRUE),
+    body_mass_g_mean = mean(body_mass_g, na.rm = TRUE)
+  )
+
+print(summary_table)
+```
+
+Indeed, though there are no significant differences between the Adelie penguins of each island, there are distinct differences between penguins of different species. We will perform k-means clustering by species to more accurately classify penguins according to their species:
+
+```{r}
+# Function to classify missing-sex penguins within each species
+classify_missing_sex = function(species_data) {
+  
+  # Subset rows where sex is missing
+  missing_sex_rows = species_data %>% filter(is.na(sex))
+  known_sex_rows = species_data %>% filter(!is.na(sex))
+  
+  # Perform k-means clustering on the numerical columns
+  kmeans_result = kmeans(species_data %>% select(bill_length_mm, bill_depth_mm, flipper_length_mm, body_mass_g), centers = 2)
+  
+  # Determine which cluster corresponds to "male" and "female" based on body_mass_g mean
+  cluster_means = aggregate(species_data$body_mass_g, by = list(kmeans_result$cluster), FUN = mean)
+  cluster_labels = ifelse(cluster_means$x[1] > cluster_means$x[2], c("male", "female"), c("female", "male"))
+  
+  # Assign predicted sexes to the missing rows
+  species_data$predicted_sex = cluster_labels[kmeans_result$cluster]
+  
+  # Replace the missing `sex` with predicted values
+  species_data$sex[is.na(species_data$sex)] = species_data$predicted_sex[is.na(species_data$sex)]
+  
+  return(species_data)
+}
+
+# Apply the function to each species group
+penguins_classified = penguinz1 %>%
+  group_by(species) %>%
+  group_map(~ classify_missing_sex(.x)) %>%
+  bind_rows()
+
+# See which penguins got successfully classified:
+print(penguins_classified[NA_genders, ])
+```
+
+Unfortunately, not all of our missing-gendered penguins were successfully classified. Fortunately, that only includes a few of them. We'll make note of them and omit them from the proceeding analysis:
+
+```{r}
+# That would be these two:
+new_NA_genders = which(is.na(penguins_classified$sex))
+print(penguins_classified[new_NA_genders, ])
+
+# Bye buddies, it's okay to be misfits:
+penguinz2 = penguins_classified[-new_NA_genders, ]
+```
+
+At long last, we can perform our exploratory analysis, replete with diagrams and plots that have some visual significance. Observe:
+
+```{r}
+library(GGally)
+library(gridExtra)
+
+# Identifying each of the numeric columns:
+numeric_cols = c("bill_length_mm", "bill_depth_mm", "flipper_length_mm", "body_mass_g")
+
+# Generate boxplots for each numeric column:
+boxplot_list <- list()
+
+for (col in numeric_cols) {
+  boxplot_list[[col]] <- ggplot(penguins_classified, aes_string(y = col)) +
+    geom_boxplot() +
+    ggtitle(paste("Boxplot of", col)) +
+    theme_minimal()
+}
+
+grid.arrange(boxplot_list[["bill_length_mm"]], boxplot_list[["bill_depth_mm"]], boxplot_list[["flipper_length_mm"]], boxplot_list[["body_mass_g"]])
+
+# Stacked barplots of penguin sex by island:
+ggplot(penguinz2, aes(x = island, fill = sex)) +
+  geom_bar(position = "stack") +
+  labs(title = "Stacked Barplot of Penguin Sex by Island", x = "Island", y = "Count") +
+  theme_minimal()
+
+# Stacked barplots of penguin island by sex:
+ggplot(penguinz2, aes(x = sex, fill = island)) +
+  geom_bar(position = "stack") +
+  labs(title = "Stacked Barplot of Penguin Island by Sex", x = "Sex", y = "Count") +
+  theme_minimal()
+
+# Scatterplot matrix of all numeric values:
+ggpairs(
+  penguinz2 %>% select(all_of(numeric_cols)),
+  title = "Scatterplot Matrix of Numeric Variables"
+)
+
+# Coefficient matrix for linear relationships between numeric variables:
+cor_matrix <- penguinz2 %>%
+  select(all_of(numeric_cols)) %>%
+  cor(use = "complete.obs")
+print("Coefficient Matrix for Linear Relationships:")
+print(cor_matrix)
+```
+
+I feel unsatisfied with this shallow level of analysis. We must go deeper! Here's a principal component analysis to assess the variance in the dataset and explore how each of the penguins' metrics are related:
+
+```{r}
+# Penguins don't have scales:
+penguinz3 = penguinz2 %>%
+  select(-island, -sex, -year, -predicted_sex)
+penguin_scale = scale(penguinz3)
+
+# I cast PRCOMP!
+pca_result = prcomp(penguin_scale, center = TRUE, scale. = TRUE)
+
+# It's super effective?
+summary(pca_result)
+
+# I have no plot and I must scree:
+plot(pca_result, type = "l", main = "Scree Plot")
+
+# I asked ChatGPT to make a biplot joke and it went in different directions:
+biplot(pca_result, main = "Biplot of PCA")
+```
+
+Now for K-means clustering on our squawky clean dataset:
+
+```{r}
+# Wait, didn't we do this already?
+# TWice?
+
+# Clustering:
+set.seed(6969)
+wss = sapply(1:10, function(k) {
+  kmeans(penguin_scale, centers = k, nstart = 10)$tot.withinss
+})
+plot(1:10, wss, type = "b", pch = 19, frame = FALSE, 
+     xlab = "Number of Clusters", ylab = "Total Within-Cluster Sum of Squares",
+     main = "Elbow Method for Choosing k")
+
+set.seed(9696)
+kmeans_result <- kmeans(penguin_scale, centers = 2, nstart = 25)
+
+# Cluster assignments:
+penguinz3 <- as.data.frame(penguinz3)
+penguinz3$cluster <- as.factor(kmeans_result$cluster)
+
+# Visualization:
+ggplot(penguinz3, aes(x = bill_length_mm, y = flipper_length_mm, color = cluster)) +
+  geom_point(size = 3) +
+  labs(title = "K-means Clustering of Penguins",
+       x = "Bill Length (mm)",
+       y = "Flipper Length (mm)") +
+  theme_minimal()
+```
