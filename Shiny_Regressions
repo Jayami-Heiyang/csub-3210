@@ -1,0 +1,207 @@
+library(shiny)
+library(shinyWidgets)
+library(DT)
+library(plotly)
+library(ggplot2)
+
+# Define UI
+ui <- fluidPage(
+  titlePanel("Multiple Linear Regression and PCA Analysis"),
+  
+  sidebarLayout(
+    sidebarPanel(
+      fileInput("datafile", "Upload Data File (R-readable)", 
+                accept = c(".csv", ".tsv", ".txt", ".rds")),
+      uiOutput("dependent_var"),
+      uiOutput("predictor_vars"),
+      selectInput("point_shape", "Select 2D Point Shape", 
+                  choices = list("Circle" = 16, "Triangle" = 17, "Square" = 15, 
+                                 "Diamond" = 18, "Plus" = 3, "Cross" = 4), 
+                  selected = 16),
+      selectInput("plotly_shape", "Select 3D Point Shape",
+                  choices = list(
+                    "Circle" = "circle",
+                    "Square" = "square",
+                    "Diamond" = "diamond",
+                    "Triangle Up" = "triangle-up",
+                    "Triangle Down" = "triangle-down",
+                    "Cross" = "cross",
+                    "X" = "x"
+                  ),
+                  selected = "circle"),
+      sliderInput("point_size", "Select Point Size", 
+                  min = 1, max = 10, value = 3, step = 1),
+      actionButton("run_model", "Run Regression"),
+      actionButton("run_pca", "Run PCA")
+    ),
+    
+    mainPanel(
+      tabsetPanel(
+        tabPanel("Dataset Preview", dataTableOutput("data_preview")),
+        tabPanel("Regression Output", verbatimTextOutput("regression_output")),
+        tabPanel("Plots", uiOutput("plot_output")),
+        tabPanel("PCA Analysis", 
+                 dataTableOutput("pca_table"),
+                 plotOutput("scree_plot"),
+                 plotlyOutput("biplot"))
+      )
+    )
+  )
+)
+
+# Define Server
+server <- function(input, output, session) {
+  
+  # Reactive expression to read uploaded file
+  dataset <- reactive({
+    req(input$datafile)
+    ext <- tools::file_ext(input$datafile$name)
+    switch(ext,
+           "csv" = read.csv(input$datafile$datapath),
+           "tsv" = read.delim(input$datafile$datapath),
+           "txt" = read.table(input$datafile$datapath, header = TRUE),
+           "rds" = readRDS(input$datafile$datapath),
+           stop("Unsupported file format"))
+  })
+  
+  # UI outputs for selecting variables
+  output$dependent_var <- renderUI({
+    req(dataset())
+    selectInput("dep_var", "Select Dependent Variable", 
+                choices = names(dataset()))
+  })
+  
+  output$predictor_vars <- renderUI({
+    req(dataset())
+    pickerInput("pred_vars", "Select Predictor Variable(s)", 
+                choices = names(dataset()), 
+                multiple = TRUE, 
+                options = list(`actions-box` = TRUE))
+  })
+  
+  # Preview the uploaded dataset
+  output$data_preview <- renderDataTable({
+    req(dataset())
+    datatable(dataset(), options = list(scrollX = TRUE))
+  })
+  
+  # Perform regression and render output
+  regression_result <- eventReactive(input$run_model, {
+    req(input$dep_var, input$pred_vars)
+    formula <- as.formula(paste(input$dep_var, "~", paste(input$pred_vars, collapse = "+")))
+    lm(formula, data = dataset())
+  })
+  
+  output$regression_output <- renderPrint({
+    req(regression_result())
+    summary(regression_result())
+  })
+  
+  # Render plot based on selected predictors
+  output$plot_output <- renderUI({
+    req(input$pred_vars)
+    if (length(input$pred_vars) == 1) {
+      plotOutput("scatterplot")
+    } else if (length(input$pred_vars) == 2) {
+      plotlyOutput("scatterplot3d")
+    } else {
+      h4("Plots are only available for one or two predictor variables.")
+    }
+  })
+  
+  # Scatterplot with regression line
+  output$scatterplot <- renderPlot({
+    req(regression_result(), length(input$pred_vars) == 1)
+    plot_data <- dataset()
+    predictor <- input$pred_vars[1]
+    dependent <- input$dep_var
+    req(predictor %in% names(plot_data), dependent %in% names(plot_data))
+    
+    plot(plot_data[[predictor]], plot_data[[dependent]], 
+         xlab = predictor, 
+         ylab = dependent, 
+         main = "Scatterplot with Regression Line",
+         pch = as.numeric(input$point_shape),
+         cex = input$point_size)
+    abline(regression_result(), col = "blue", lwd = 2)
+  })
+  
+  # 3D scatterplot with regression plane
+  output$scatterplot3d <- renderPlotly({
+    req(regression_result(), length(input$pred_vars) == 2)
+    plot_data <- dataset()
+    plotly::plot_ly(plot_data, 
+                    x = ~plot_data[[input$pred_vars[1]]], 
+                    y = ~plot_data[[input$pred_vars[2]]], 
+                    z = ~plot_data[[input$dep_var]], 
+                    type = "scatter3d", 
+                    mode = "markers", 
+                    marker = list(symbol = input$plotly_shape, size = input$point_size * 2)) %>%
+      layout(scene = list(
+        xaxis = list(title = input$pred_vars[1]),
+        yaxis = list(title = input$pred_vars[2]),
+        zaxis = list(title = input$dep_var)
+      ))
+  })
+  
+  # Perform PCA and display results
+  pca_result <- eventReactive(input$run_pca, {
+    req(input$pred_vars, dataset())
+    pca_data <- dataset()[, input$pred_vars, drop = FALSE]
+    
+    # Keep only numeric columns and remove rows with non-numeric or NA values
+    pca_data <- pca_data[sapply(pca_data, is.numeric)] # Ensure columns are numeric
+    pca_data <- na.omit(pca_data)                     # Remove rows with NA values
+    
+    if (nrow(pca_data) < 2) { # Ensure sufficient data for PCA
+      stop("Not enough valid data for PCA after cleaning. Check the input variables.")
+    }
+    
+    prcomp(pca_data, scale. = TRUE)
+  })
+  
+  output$pca_table <- renderDataTable({
+    req(pca_result())
+    explained_variance <- summary(pca_result())$importance
+    explained_variance <- as.data.frame(t(explained_variance))
+    datatable(explained_variance, options = list(scrollX = TRUE),
+              caption = "Explained Variance by Principal Components")
+  })
+  
+  output$scree_plot <- renderPlot({
+    req(pca_result())
+    explained_variance <- summary(pca_result())$importance["Proportion of Variance", ]
+    data <- data.frame(
+      PrincipalComponent = 1:length(explained_variance),
+      VarianceExplained = explained_variance
+    )
+    
+    ggplot(data, aes(x = PrincipalComponent, y = VarianceExplained)) +
+      geom_bar(stat = "identity", fill = "steelblue", alpha = 0.7) +
+      geom_line(aes(group = 1), color = "red", size = 1) +
+      geom_point(color = "red", size = 2) +
+      xlab("Principal Component") +
+      ylab("Proportion of Variance Explained") +
+      ggtitle("Scree Plot with Bar and Line Graph") +
+      theme_minimal()
+  })
+  
+  output$biplot <- renderPlotly({
+    req(pca_result())
+    pca <- pca_result()
+    pca_scores <- as.data.frame(pca$x)
+    loadings <- as.data.frame(pca$rotation)
+    p <- ggplot(pca_scores, aes_string(x = "PC1", y = "PC2")) +
+      geom_point(size = input$point_size, shape = as.numeric(input$point_shape)) +
+      geom_segment(data = loadings, aes(x = 0, y = 0, xend = PC1 * 2, yend = PC2 * 2), 
+                   arrow = arrow(length = unit(0.2, "cm")), color = "red") +
+      geom_text(data = loadings, aes(x = PC1 * 2.2, y = PC2 * 2.2, label = rownames(loadings)), 
+                color = "blue", size = 4) +
+      xlab("PC1") + ylab("PC2") +
+      ggtitle("PCA Biplot")
+    ggplotly(p)
+  })
+}
+
+# Run the app
+shinyApp(ui, server)
