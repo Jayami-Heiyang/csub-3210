@@ -1,0 +1,211 @@
+library(shiny)
+library(palmerpenguins)
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(FactoMineR)
+library(factoextra)
+library(shinyjs)
+
+# Define UI
+ui <- fluidPage(
+  useShinyjs(),
+  
+  titlePanel("Palmer Penguins Dataset Viewer"),
+  
+  sidebarLayout(
+    sidebarPanel(
+      selectInput("x_var", "Select X-axis variable:",
+                  choices = names(penguins)[sapply(penguins, is.numeric)],
+                  selected = "bill_length_mm"),
+      
+      selectInput("y_var", "Select Y-axis variable:",
+                  choices = names(penguins)[sapply(penguins, is.numeric)],
+                  selected = "bill_depth_mm"),
+      
+      selectInput("color_var", "Select Color Grouping Variable:",
+                  choices = c("species", "island", "sex"),
+                  selected = "species"),
+      
+      checkboxInput("show_table", "Show Data Table", value = TRUE),
+      
+      selectInput("cleaning_type", "Select Cleaning Operation:",
+                  choices = c(
+                    "Remove any row with missing values",
+                    "Remove rows with all values missing",
+                    "Replace missing values with medians",
+                    "Replace missing values with means"
+                  )),
+      
+      actionButton("clean_data", "Clean Dataset"),
+      
+      hr(),
+      
+      # Column creation inputs
+      selectInput("col1", "Select First Column:", choices = NULL),
+      selectInput("col2", "Select Second Column:", choices = NULL),
+      selectInput("operation", "Select Operation:",
+                  choices = c("Add" = "+", "Subtract" = "-", "Multiply" = "*", "Divide" = "/")),
+      textInput("new_col_name", "Enter New Column Name:", ""),
+      actionButton("add_column", "Add New Column"),
+      
+      hr(),
+      
+      # Clustering inputs
+      numericInput("num_clusters", "Number of Clusters:", value = 3, min = 2),
+      actionButton("run_clustering", "Run K-means Clustering", disabled = TRUE)
+    ),
+    
+    mainPanel(
+      tabsetPanel(
+        tabPanel("Plot", plotOutput("scatterPlot")),
+        tabPanel("Table", conditionalPanel(
+          condition = "input.show_table == true",
+          dataTableOutput("dataTable")
+        )),
+        tabPanel("PCA",
+                 plotOutput("screePlot"),
+                 plotOutput("biplot")),
+        tabPanel("Clustering",
+                 tableOutput("clusterSummary"),
+                 uiOutput("categoricalHistograms"))
+      )
+    )
+  )
+)
+
+# Define server logic
+server <- function(input, output, session) {
+  cleaned_data <- reactiveVal(penguins)
+  
+  observe({
+    updateSelectInput(session, "col1", choices = names(cleaned_data())[sapply(cleaned_data(), is.numeric)])
+    updateSelectInput(session, "col2", choices = names(cleaned_data())[sapply(cleaned_data(), is.numeric)])
+  })
+  
+  observeEvent(input$clean_data, {
+    cleaned <- cleaned_data()
+    
+    if (input$cleaning_type == "Remove any row with missing values") {
+      cleaned <- cleaned %>% drop_na()
+    } else if (input$cleaning_type == "Remove rows with all values missing") {
+      cleaned <- cleaned %>% filter(rowSums(is.na(select(., where(is.numeric)))) < ncol(select(., where(is.numeric))))
+    } else if (input$cleaning_type == "Replace missing values with medians") {
+      cleaned <- cleaned %>% mutate(across(where(is.numeric), ~replace_na(., median(., na.rm = TRUE))))
+    } else if (input$cleaning_type == "Replace missing values with means") {
+      cleaned <- cleaned %>% mutate(across(where(is.numeric), ~replace_na(., mean(., na.rm = TRUE))))
+    } 
+    
+    cleaned_data(cleaned)
+    enable("run_clustering")
+  })
+  
+  observeEvent(input$add_column, {
+    req(input$col1, input$col2, input$new_col_name, input$operation)
+    new_data <- cleaned_data()
+    
+    if (input$operation == "+") {
+      new_data <- new_data %>% mutate(!!input$new_col_name := .data[[input$col1]] + .data[[input$col2]])
+    } else if (input$operation == "-") {
+      new_data <- new_data %>% mutate(!!input$new_col_name := .data[[input$col1]] - .data[[input$col2]])
+    } else if (input$operation == "*") {
+      new_data <- new_data %>% mutate(!!input$new_col_name := .data[[input$col1]] * .data[[input$col2]])
+    } else if (input$operation == "/") {
+      new_data <- new_data %>% mutate(!!input$new_col_name := .data[[input$col1]] / .data[[input$col2]])
+    }
+    
+    cleaned_data(new_data)
+  })
+  
+  output$scatterPlot <- renderPlot({
+    ggplot(cleaned_data(), aes_string(x = input$x_var, y = input$y_var, color = input$color_var)) +
+      geom_point(size = 3, alpha = 0.7, na.rm = TRUE) +
+      labs(title = "Scatter Plot of Palmer Penguins",
+           x = input$x_var,
+           y = input$y_var,
+           color = input$color_var) +
+      theme_minimal()
+  })
+  
+  output$dataTable <- renderDataTable({
+    cleaned_data()
+  })
+  
+  # PCA Analysis
+  pca_results <- reactive({
+    numeric_data <- cleaned_data() %>%
+      select(where(is.numeric)) %>%
+      drop_na()
+    PCA(numeric_data, graph = FALSE)
+  })
+  
+  output$screePlot <- renderPlot({
+    fviz_screeplot(pca_results(), addlabels = TRUE, ylim = c(0, 100)) +
+      labs(title = "Scree Plot",
+           x = "Principal Components",
+           y = "Percentage of Variance Explained") +
+      theme_minimal()
+  })
+  
+  output$biplot <- renderPlot({
+    fviz_pca_biplot(pca_results(),
+                    geom = c("point", "text"),
+                    repel = TRUE,
+                    col.var = "blue",
+                    col.ind = "red") +
+      labs(title = "PCA Biplot") +
+      theme_minimal()
+  })
+  
+  clustering_results <- reactiveVal(NULL)
+  
+  observeEvent(input$run_clustering, {
+    numeric_data <- cleaned_data() %>%
+      select(where(is.numeric)) %>%
+      drop_na()
+    
+    if (nrow(numeric_data) > 0) {
+      kmeans_res <- kmeans(numeric_data, centers = input$num_clusters, nstart = 25)
+      clustered_data <- cleaned_data() %>%
+        drop_na() %>%
+        mutate(cluster = factor(kmeans_res$cluster))
+      
+      clustering_results(list(
+        data = clustered_data,
+        summary = aggregate(. ~ cluster, data = numeric_data %>% mutate(cluster = factor(kmeans_res$cluster)), mean),
+        clusters = kmeans_res
+      ))
+    } else {
+      clustering_results(NULL)
+    }
+  })
+  
+  output$clusterSummary <- renderTable({
+    res <- clustering_results()
+    if (!is.null(res)) {
+      res$summary
+    }
+  })
+  
+  output$categoricalHistograms <- renderUI({
+    res <- clustering_results()
+    if (!is.null(res)) {
+      data <- res$data
+      plots <- lapply(c("species", "island", "sex"), function(cat_var) {
+        if (cat_var %in% names(data)) {
+          renderPlot({
+            ggplot(data, aes_string(x = cat_var, fill = "cluster")) +
+              geom_bar(position = "dodge", na.rm = TRUE) +
+              labs(title = paste("Histogram of", cat_var, "by Cluster"),
+                   x = cat_var, fill = "Cluster") +
+              theme_minimal()
+          })
+        }
+      })
+      do.call(tagList, plots)
+    }
+  })
+}
+
+# Run the application
+shinyApp(ui = ui, server = server)
